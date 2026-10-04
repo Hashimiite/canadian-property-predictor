@@ -1,0 +1,13 @@
+.venv/
+__pycache__/
+.DS_Store
+tempCodeRunnerFile.py
+
+# Not used by the app or training (kept locally)
+data.json
+housing_model.joblib
+housing_dollar_model.joblib
+land_model.joblib
+
+# 95 MB Statistics Canada table that training doesn't read; see README to download it
+tables/interest.csv

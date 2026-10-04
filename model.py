@@ -1,11 +1,13 @@
 import pandas as pd
 import numpy as np
 from sklearn.model_selection import train_test_split, cross_val_score
-from sklearn.ensemble import RandomForestRegressor
+from sklearn.ensemble import GradientBoostingRegressor, RandomForestRegressor
 from sklearn.preprocessing import StandardScaler, LabelEncoder
 from sklearn.metrics import r2_score, mean_squared_error, mean_absolute_error
 import joblib
 import os
+
+import charts
 import warnings
 warnings.filterwarnings('ignore')
 
@@ -183,30 +185,49 @@ def train_final_model(df, data_type, label_encoder, chosen_option):
     scaler = StandardScaler()
     X_train_scaled = scaler.fit_transform(X_train)
     X_test_scaled = scaler.transform(X_test)
-    # Train  model
-    print("\nTraining Random Forest model...")
-    model = RandomForestRegressor(
-        n_estimators=200,
-        max_depth=10,
-        min_samples_split=5,
-        min_samples_leaf=2,
-        random_state=42,
-        n_jobs=-1,
-        verbose=0
-    )
-    model.fit(X_train_scaled, y_train)
-    
-    # Evaluateion
-    y_pred = model.predict(X_test_scaled)
-    r2 = r2_score(y_test, y_pred)
-    rmse = np.sqrt(mean_squared_error(y_test, y_pred))
-    mae = mean_absolute_error(y_test, y_pred)
+    # Train both candidates on the same split and keep the better one
+    candidates = {
+        "Random Forest": RandomForestRegressor(
+            n_estimators=200,
+            max_depth=10,
+            min_samples_split=5,
+            min_samples_leaf=2,
+            random_state=42,
+            n_jobs=-1,
+        ),
+        "Gradient Boosting": GradientBoostingRegressor(
+            n_estimators=400,
+            learning_rate=0.05,
+            max_depth=3,
+            subsample=0.9,
+            random_state=42,
+        ),
+    }
+    comparison = {}
+    fitted = {}
+    for name, candidate in candidates.items():
+        print(f"\nTraining {name}...")
+        candidate.fit(X_train_scaled, y_train)
+        y_pred = candidate.predict(X_test_scaled)
+        cv_r2 = cross_val_score(candidate, X_train_scaled, y_train, cv=5, scoring="r2")
+        comparison[name] = {
+            "r2": r2_score(y_test, y_pred),
+            "rmse": float(np.sqrt(mean_squared_error(y_test, y_pred))),
+            "mae": mean_absolute_error(y_test, y_pred),
+            "cv_r2_mean": cv_r2.mean(),
+            "cv_r2_std": cv_r2.std(),
+        }
+        fitted[name] = (candidate, y_pred)
+
     print("\n" + "="*60)
-    print("MODEL PERFORMANCE:")
-    print(f"R² Score: {r2:.4f}")
-    print(f"RMSE: ${rmse:,.0f}")
-    print(f"MAE: ${mae:,.0f}")
-    print(f"Mean Value: ${y.mean():,.0f}")
+    print("MODEL COMPARISON (held out 20%, plus 5 fold CV on the training set):")
+    for name, m in comparison.items():
+        print(f"  {name:18} R² {m['r2']:.4f}  MAE ${m['mae']:,.0f}  RMSE ${m['rmse']:,.0f}  "
+              f"CV R² {m['cv_r2_mean']:.4f} ± {m['cv_r2_std']:.4f}")
+    best_name = max(comparison, key=lambda name: comparison[name]["r2"])
+    model, y_pred = fitted[best_name]
+    r2, rmse, mae = (comparison[best_name][k] for k in ("r2", "rmse", "mae"))
+    print(f"\nSelected model: {best_name}")
     print(f"MAE as % of mean: {(mae / y.mean() * 100):.1f}%")
     print("="*60)
     print("\nFEATURE IMPORTANCE:")
@@ -214,10 +235,22 @@ def train_final_model(df, data_type, label_encoder, chosen_option):
         'feature': X.columns,
         'importance': model.feature_importances_
     }).sort_values('importance', ascending=False)
-    
+
     for _, row in importance.iterrows():
         print(f"  {row['feature']}: {row['importance']:.4f}")
-    
+
+    # Charts with Matplotlib and Seaborn
+    os.makedirs("figures", exist_ok=True)
+    figures = {
+        "price_trends.png": charts.price_trends(df),
+        "model_comparison.png": charts.model_comparison(comparison),
+        "actual_vs_predicted.png": charts.actual_vs_predicted(y_test.to_numpy(), y_pred, best_name),
+        "feature_importance.png": charts.feature_importance(X.columns.tolist(), model.feature_importances_, best_name),
+    }
+    for filename, fig in figures.items():
+        fig.savefig(os.path.join("figures", filename), dpi=150)
+    print(f"\nSaved {len(figures)} charts to figures/")
+
     # Saving model
     model_data = {
         'model': model,
@@ -225,6 +258,10 @@ def train_final_model(df, data_type, label_encoder, chosen_option):
         'label_encoder': label_encoder,
         'feature_names': X.columns.tolist(),
         'metrics': {'r2': r2, 'rmse': rmse, 'mae': mae, 'mean_value': y.mean()},
+        'model_name': best_name,
+        'comparison': comparison,
+        'test_actual': y_test.to_numpy(),
+        'test_predicted': y_pred,
         'data_type': data_type,
         'chosen_option': chosen_option,
         'target_unit': 'CAD',
@@ -238,7 +275,7 @@ def train_final_model(df, data_type, label_encoder, chosen_option):
     print("\n" + "="*60)
     print("SAMPLE PREDICTION:")
     
-    sample_idx = np.random.randint(0, len(df))
+    sample_idx = np.random.default_rng(42).integers(0, len(df))
     sample = X.iloc[sample_idx:sample_idx+1].copy()
     sample_scaled = scaler.transform(sample)
     prediction = model.predict(sample_scaled)[0]
@@ -260,7 +297,7 @@ def train_model():
     df_option1, type1 = load_housing_index_with_conversion()
     print(f"\n Using data: {type1}")
     # Prepare features
-    df_features, le = prepare_features(df_option1, type1)
+    df_features, le = prepare_features(df_option1)
     df_features = df_features.dropna()
     if len(df_features) < 10:
         print("Not enough data after feature preparation!")

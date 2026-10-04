@@ -7,6 +7,8 @@ import plotly.express as px
 import plotly.graph_objects as go
 from datetime import datetime
 
+import charts
+
 st.set_page_config(page_title="Canadian Property Value Predictor", layout="wide")
 
 @st.cache_resource
@@ -373,6 +375,23 @@ def main():
                 st.caption("Example forecast showing typical growth pattern")
             with details_placeholder.container():
                 st.caption("Adjust the sliders to see how different economic factors affect property values over time.")
+
+    # Model evaluation drawn with Matplotlib and Seaborn
+    if model_data and "comparison" in model_data:
+        st.markdown("---")
+        st.subheader("How the model performs")
+        best = model_data.get("model_name", "Model")
+        st.caption(
+            f"{best} was selected after comparing models on the same held out 20% of the data. "
+            "It predicts each year's price from the previous year, so these scores describe one year ahead accuracy."
+        )
+        tab_compare, tab_fit, tab_features = st.tabs(["Model comparison", "Actual vs predicted", "Feature importance"])
+        with tab_compare:
+            st.pyplot(charts.model_comparison(model_data["comparison"]))
+        with tab_fit:
+            st.pyplot(charts.actual_vs_predicted(model_data["test_actual"], model_data["test_predicted"], best))
+        with tab_features:
+            st.pyplot(charts.feature_importance(model_data["feature_names"], model_data["model"].feature_importances_, best))
                 
 if __name__ == "__main__":
     main()

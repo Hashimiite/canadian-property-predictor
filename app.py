@@ -8,6 +8,7 @@ import plotly.graph_objects as go
 from datetime import datetime
 
 import charts
+from model import forecast
 
 st.set_page_config(page_title="Canadian Property Value Predictor", layout="wide")
 
@@ -24,69 +25,6 @@ def load_latest_model():
     except:
         return None, None
 
-def create_prediction_features(province, year, economic_factors, model_data=None):
-    """Create features"""
-    features = {}
-    # bbest scenario: Getting province encoding from model 
-    if model_data and 'label_encoder' in model_data:
-        try:
-            province_code = model_data['label_encoder'].transform([province])[0]
-        except:
-            # Fallback encoding
-            province_codes = {
-                'Ontario': 0, 'Quebec': 1, 'British Columbia': 2, 'Alberta': 3,
-                'Manitoba': 4, 'Saskatchewan': 5, 'Nova Scotia': 6, 'New Brunswick': 7,
-                'Newfoundland and Labrador': 8, 'Prince Edward Island': 9, 'Canada': 10
-            }
-            province_code = province_codes.get(province, 0)
-    else:
-       # Fallback encoding
-        province_codes = {
-            'Ontario': 0, 'Quebec': 1, 'British Columbia': 2, 'Alberta': 3,
-            'Manitoba': 4, 'Saskatchewan': 5, 'Nova Scotia': 6, 'New Brunswick': 7,
-            'Newfoundland and Labrador': 8, 'Prince Edward Island': 9, 'Canada': 10
-        }
-        province_code = province_codes.get(province, 0)
-        
-    # Base features
-    features['YEAR'] = year
-    features['TIME_TREND'] = year - 2015
-    features['PROVINCE_CODE'] = province_code
-    # Base values for each province (2024 estimates)
-    base_values = {
-        'Ontario': 850000,
-        'Quebec': 480000,
-        'British Columbia': 950000,
-        'Alberta': 520000,
-        'Manitoba': 370000,
-        'Saskatchewan': 320000,
-        'Nova Scotia': 380000,
-        'New Brunswick': 320000,
-        'Newfoundland and Labrador': 340000,
-        'Prince Edward Island': 350000
-    }
-    # Get base value,growth for province and then apply econ factors
-    base_value = base_values.get(province, 400000)
-    base_growth = 0.03  # 3% base growth
-    adjusted_growth = base_growth + economic_factors['interest_rate_impact'] + economic_factors['crime_impact']
-    growth_multiplier = (1 + economic_factors['population_growth_impact']) * (1 + economic_factors['economic_outlook_impact'])
-    adjusted_growth *= growth_multiplier
-    
-    # calculate year
-    current_year = pd.Timestamp.now().year
-    # Calculate value based on year difference from current year
-    years_from_now = year - current_year
-    adjusted_value = base_value * ((1 + adjusted_growth) ** years_from_now)
-    features['VALUE_LAG1'] = adjusted_value * 0.97  # Previous year value (3% less)
-    features['GROWTH_RATE'] = adjusted_growth
-    
-    # Add any additional features the model expects if available if you have extra csv's
-    if model_data and 'feature_names' in model_data:
-        for feature in model_data['feature_names']:
-            if feature not in features:
-                features[feature] = 0
-    return features, adjusted_value, adjusted_growth
-
 def calculate_economic_impacts(interest_rate_change, crime_change, population_growth, economic_outlook):
     """Calculate impacts impact on housing prices"""
     interest_rate_impact = -0.02 * interest_rate_change
@@ -100,65 +38,34 @@ def calculate_economic_impacts(interest_rate_change, crime_change, population_gr
         'economic_outlook_impact': economic_outlook_impact
     }
 
-def generate_predictions_over_years(province, start_year, end_year, economic_factors, model_data=None, model=None, scaler=None):
-    """Generate predictions for years"""
-    predictions = []
-    current_year = pd.Timestamp.now().year
-    base_growth = 0.03 
-    adjusted_growth = base_growth + economic_factors['interest_rate_impact'] + economic_factors['crime_impact']
-    growth_multiplier = (1 + economic_factors['population_growth_impact']) * (1 + economic_factors['economic_outlook_impact'])
-    final_growth_rate = adjusted_growth * growth_multiplier
-    base_values = {
-        'Ontario': 850000,
-        'Quebec': 480000,
-        'British Columbia': 950000,
-        'Alberta': 520000,
-        'Manitoba': 370000,
-        'Saskatchewan': 320000,
-        'Nova Scotia': 380000,
-        'New Brunswick': 320000,
-        'Newfoundland and Labrador': 340000,
-        'Prince Edward Island': 350000
-    }
-    base_value = base_values.get(province, 400000)
-    for year in range(start_year, end_year + 1):
-        years_from_now = year - current_year
-        simple_prediction = base_value * ((1 + final_growth_rate) ** years_from_now)
-        # If model is available, use it
-        if model_data and model and scaler:
-            features, _, _ = create_prediction_features(province, year, economic_factors, model_data)
-            try:
-                if 'feature_names' in model_data:
-                    features_dict = {}
-                    for feature in model_data['feature_names']:
-                        if feature in features:
-                            features_dict[feature] = features[feature]
-                        else:
-                            features_dict[feature] = 0
-                    
-                    features_df = pd.DataFrame([features_dict])
-                    features_scaled = scaler.transform(features_df)
-                    prediction = model.predict(features_scaled)[0]
-                else:
-                    prediction = simple_prediction
-            except:
-                prediction = simple_prediction
-        else:
-            prediction = simple_prediction
-        
-        predictions.append({
-            'Year': year,
-            'Predicted_Value': prediction,
-            'Growth_Rate': final_growth_rate * 100
-        })
-    
-    return pd.DataFrame(predictions)
+def generate_predictions_over_years(province, start_year, end_year, economic_factors, model_data):
+    """Compound the model's predicted yearly growth from the province's latest price, shifted by the scenario."""
+    code = model_data["label_encoder"].transform([province])[0]
 
-def create_line_chart(prediction_data, province, value_label):
+    def adjust(g):
+        g = g + economic_factors["interest_rate_impact"] + economic_factors["crime_impact"]
+        return g * (1 + economic_factors["population_growth_impact"]) * (1 + economic_factors["economic_outlook_impact"])
+
+    rows = forecast(model_data["model"], model_data["history"][province], code, end_year, adjust)
+    return pd.DataFrame(
+        [{"Year": y, "Predicted_Value": price, "Growth_Rate": g * 100} for y, price, g in rows if y >= start_year]
+    )
+
+
+def create_line_chart(prediction_data, province, value_label, history=None):
     """Create the line chart"""
     
     fig = go.Figure()
-    
+    if history:
+        years = [y for y in sorted(history) if y >= 1990]
+        fig.add_trace(go.Scatter(
+            x=years,
+            y=[history[y] for y in years],
+            mode='lines',
+            name='Since 1990',
+            line=dict(color='#9a9a9a', width=2),
+            hovertemplate='Year: %{x}<br>Estimated price: $%{y:,.0f}<extra></extra>'
+        ))
     fig.add_trace(go.Scatter(
         x=prediction_data['Year'],
         y=prediction_data['Predicted_Value'],
@@ -176,7 +83,8 @@ def create_line_chart(prediction_data, province, value_label):
         hovermode='x unified',
         height=500,
         template='plotly_white',
-        showlegend=False,
+        showlegend=bool(history),
+        legend=dict(orientation='h', y=1.08),
         margin=dict(l=20, r=20, t=60, b=20)
     )
     fig.update_yaxes(
@@ -191,15 +99,14 @@ def main():
     model_info = load_latest_model()
     # Initialize variables
     model_data = None
-    model = None
-    scaler = None
     data_type = 'house_prices'
-    
+
     if model_info and model_info[0]:
         model_data, model_file = model_info
-        model = model_data.get('model')
-        scaler = model_data.get('scaler')
         data_type = model_data.get('data_type', 'house_prices')
+    if not model_data or "history" not in model_data:
+        st.error("No trained model found. Run `python model.py` first.")
+        st.stop()
     
     # Determine value label based on data type
     if 'house' in str(data_type).lower():
@@ -218,29 +125,30 @@ def main():
         # Province selection
         province = st.selectbox(
             "Select Province",
-            ["Ontario", "Quebec", "British Columbia", "Alberta",
+            ["Canada", "Ontario", "Quebec", "British Columbia", "Alberta",
              "Manitoba", "Saskatchewan", "Nova Scotia", "New Brunswick",
              "Newfoundland and Labrador", "Prince Edward Island"]
         )
         # Year range selection
-        current_year = pd.Timestamp.now().year
+        first_forecast_year = max(max(h) for h in model_data["history"].values()) + 1
         st.markdown("Forecast Period")
         col1a, col1b = st.columns(2)
         with col1a:
             start_year = st.number_input(
                 "Start Year",
-                min_value=current_year,
-                max_value=current_year + 10,
-                value=current_year,
+                min_value=first_forecast_year,
+                max_value=2099,
+                value=first_forecast_year,
                 step=1
             )
         with col1b:
             end_year = st.number_input(
                 "End Year",
-                min_value=current_year + 1,
-                max_value=current_year + 10,
-                value=current_year + 5,
-                step=1
+                min_value=first_forecast_year + 1,
+                max_value=2100,
+                value=first_forecast_year + 10,
+                step=1,
+                help="Forecasts compound year by year and can run as far as 2100."
             )
             
         if end_year <= start_year:
@@ -301,14 +209,12 @@ def main():
                     province,  
                     start_year, 
                     end_year,
-                    economic_factors, 
-                    model_data, 
-                    model, 
-                    scaler
+                    economic_factors,
+                    model_data,
                 )
                 end_year_prediction = predictions_df[predictions_df['Year'] == end_year].iloc[0]
                 start_year_prediction = predictions_df[predictions_df['Year'] == start_year].iloc[0]
-                fig = create_line_chart(predictions_df, province, value_label) # Create and display line chart
+                fig = create_line_chart(predictions_df, province, value_label, model_data['history'][province])
                 chart_placeholder.plotly_chart(fig, use_container_width=True)
                 with details_placeholder.container():
                     st.markdown("---")
@@ -364,15 +270,14 @@ def main():
                         st.dataframe(factors_df, use_container_width=True, hide_index=True)
         else: # Show instruction
             with chart_placeholder.container():
-                st.info("Configure prediction settings and click 'Generate Forecast' to see results")
-                # Show example chart
-                example_data = pd.DataFrame({
-                    'Year': [2024, 2025, 2026, 2027, 2028],
-                    'Predicted_Value': [850000, 875500, 901765, 928818, 956682]
-                })
-                example_fig = create_line_chart(example_data, "Example Province", value_label)
-                st.plotly_chart(example_fig, use_container_width=True)
-                st.caption("Example forecast showing typical growth pattern")
+                st.info("Adjust the settings and click 'Generate Forecast' to update this chart")
+                preview_factors = calculate_economic_impacts(
+                    interest_rate_change, crime_change, population_growth, economic_outlook
+                )
+                preview = generate_predictions_over_years(province, start_year, end_year, preview_factors, model_data)
+                preview_fig = create_line_chart(preview, province, value_label, model_data["history"][province])
+                st.plotly_chart(preview_fig, use_container_width=True)
+                st.caption(f"Prices since 1990 and the forecast to {end_year} at the current settings")
             with details_placeholder.container():
                 st.caption("Adjust the sliders to see how different economic factors affect property values over time.")
 
@@ -382,8 +287,9 @@ def main():
         st.subheader("How the model performs")
         best = model_data.get("model_name", "Model")
         st.caption(
-            f"{best} was selected after comparing models on the same held out 20% of the data. "
-            "It predicts each year's price from the previous year, so these scores describe one year ahead accuracy."
+            f"Both models trained on 1990 to 2017 and were tested on 2018 onward; {best} scored better. "
+            "It predicts each year's growth from recent growth, so these scores describe one year ahead accuracy. "
+            "Longer forecasts compound those predictions and grow less certain the further out they go."
         )
         tab_compare, tab_fit, tab_features = st.tabs(["Model comparison", "Actual vs predicted", "Feature importance"])
         with tab_compare:

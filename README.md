@@ -1,29 +1,33 @@
 # Canadian property predictor
 
-A machine learning model that estimates average new house prices for each Canadian province, with a Streamlit app for exploring forecasts under different economic scenarios.
+A machine learning model that forecasts average new house prices for Canada and each province, with a Streamlit app that projects prices from 2026 to any year up to 2100 under different economic scenarios.
+
+![House prices since 1990 and the ten year forecast](figures/forecast.png)
 
 ## How it works
 
-`model.py` reads the Statistics Canada new housing price index (1981 onward), converts the index into estimated prices in Canadian dollars and engineers features such as the previous year's value, the growth rate, the decade and a time trend. It trains a Random Forest and a Gradient Boosting model on the same 80/20 split, checks both with 5 fold cross validation and saves whichever scores better, along with the scaler, encoders and metrics.
+`model.py` reads the Statistics Canada new housing price index, converts it into estimated prices in Canadian dollars and keeps every year from 1990 to 2025. Instead of predicting a price directly, the models predict each year's growth from the previous years' growth, the region and the year. Forecasts then compound those predictions year by year from each region's latest price, which lets them run well past the range the models were trained on.
 
-| Model | R² (held out) | Mean absolute error | Cross validated R² |
+Two models were trained on 1990 to 2017 and tested on 2018 to 2025, so the test years are ones the models never saw:
+
+| Model | R² (one year ahead price) | Mean absolute error | Growth error |
 |---|---|---|---|
-| Random Forest | 0.968 | $11,179 | 0.990 |
-| **Gradient Boosting** (selected) | **0.981** | **$8,070** | **0.996** |
+| **Random Forest** (selected) | **0.953** | **$17,144** | **2.95 points** |
+| Gradient Boosting | 0.948 | $17,464 | 3.04 points |
 
-The previous year's price carries most of the predictive weight, so these scores describe one year ahead accuracy rather than long range forecasting. The model covers Canada and ten provinces from 1982 to 2025.
+The Random Forest scored better, so it was refit on all years from 1990 to 2025 and saved. Its forecast for Canada is about $634,000 in 2026 and $863,000 by 2035, which is roughly 3.5% growth a year. Forecasts further out compound the same way and become less certain the further they go.
 
-`app.py` loads the saved model and lets you pick a province, then adjust interest rates, crime, population growth and the economic outlook to see how the price forecast changes over the coming years. A "How the model performs" section draws the evaluation charts live.
+`app.py` loads the saved model and shows prices since 1990 next to the forecast. You can pick a region, choose any range from 2026 to 2100 (ten years by default) and adjust interest rates, crime, population growth and the economic outlook to shift each year's growth. A "How the model performs" section draws the evaluation charts live.
 
 ## Charts
 
-`charts.py` builds every evaluation chart with Matplotlib and Seaborn. Training saves them to `figures/` and the app renders the same functions live.
+`charts.py` builds every chart with Matplotlib and Seaborn. Training saves them to `figures/` and the app renders the same functions live.
 
 ![Estimated new house prices by province](figures/price_trends.png)
 
 ![Random Forest vs Gradient Boosting](figures/model_comparison.png)
 
-| Actual vs predicted | Feature importance |
+| Actual vs predicted (2018 to 2025) | Feature importance |
 |---|---|
 | ![Actual vs predicted](figures/actual_vs_predicted.png) | ![Feature importance](figures/feature_importance.png) |
 
@@ -35,7 +39,7 @@ pip install -r requirements.txt
 streamlit run app.py
 ```
 
-To retrain, run `python model.py`. It compares both models, saves the better one as `housing_model_*.joblib` (which the app picks up automatically) and redraws the charts in `figures/`.
+To retrain, run `python model.py`. It compares both models on the recent test years, refits the better one on all data, saves it as `housing_model_*.joblib` (which the app picks up automatically) and redraws the charts in `figures/`.
 
 ## Data
 

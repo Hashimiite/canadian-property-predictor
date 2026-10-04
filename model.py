@@ -1,8 +1,7 @@
 import pandas as pd
 import numpy as np
-from sklearn.model_selection import train_test_split, cross_val_score
 from sklearn.ensemble import GradientBoostingRegressor, RandomForestRegressor
-from sklearn.preprocessing import StandardScaler, LabelEncoder
+from sklearn.preprocessing import LabelEncoder
 from sklearn.metrics import r2_score, mean_squared_error, mean_absolute_error
 import joblib
 import os
@@ -137,155 +136,165 @@ def load_housing_index_with_conversion():
         print(f"Failed to convert housing index: {e}")
         return pd.DataFrame(), None
     
-def prepare_features(df):
-    """Prepare features based on data type"""
-    df = df.copy()
-    df['TIME_TREND'] = df['YEAR'] - df['YEAR'].min()
-    le = LabelEncoder()# Province encoding
-    df['PROVINCE_CODE'] = le.fit_transform(df['PROVINCE'])
-    df = df.sort_values(['PROVINCE', 'YEAR'])
-    df['VALUE_LAG1'] = df.groupby('PROVINCE')['TARGET_VALUE'].shift(1)
-    df['GROWTH_RATE'] = (df['TARGET_VALUE'] - df['VALUE_LAG1']) / df['VALUE_LAG1']     # Growth rate
-    df['GROWTH_RATE'] = df['GROWTH_RATE'].fillna(0)
-    
-    # Additional economic context for better model
-    if 'YEAR' in df.columns:
-        df['DECADE'] = (df['YEAR'] // 10) * 10  #Adding decade feature
-        df['ECONOMIC_BOOM'] = df['YEAR'].apply( # Economic boom periods (approximate)
-            lambda x: 1 if x in range(1970, 1974) or x in range(2002, 2008) or x in range(2010, 2014) else 0
-        )
-    return df, le
+FIRST_YEAR = 1990
+TEST_FROM = 2018  # train on 1990 to 2017, test on 2018 onward
+FORECAST_CHART_END = 2036
+FEATURES = ['YEAR', 'PROVINCE_CODE', 'GROWTH_LAG1', 'GROWTH_LAG2', 'GROWTH_AVG3']
 
-def train_final_model(df, data_type, label_encoder, chosen_option):
-    """Train final model with chosen data"""
+
+def prepare_features(df):
+    """Year over year growth features. The target is next year's growth, so forecasts can compound past the training range."""
+    df = df.sort_values(['PROVINCE', 'YEAR']).copy()
+    le = LabelEncoder()
+    df['PROVINCE_CODE'] = le.fit_transform(df['PROVINCE'])
+    by_province = df.groupby('PROVINCE')
+    df['VALUE_LAG1'] = by_province['TARGET_VALUE'].shift(1)
+    df['GROWTH'] = df['TARGET_VALUE'] / df['VALUE_LAG1'] - 1
+    growth = df.groupby('PROVINCE')['GROWTH']
+    df['GROWTH_LAG1'] = growth.shift(1)
+    df['GROWTH_LAG2'] = growth.shift(2)
+    df['GROWTH_AVG3'] = growth.transform(lambda g: g.shift(1).rolling(3).mean())
+    # Lags use earlier years, but training rows start in FIRST_YEAR
+    return df[df['YEAR'] >= FIRST_YEAR], le
+
+
+def features_for_year(prices, year, province_code):
+    """Feature row for `year` from a list of yearly prices that ends at year - 1."""
+    growth = [prices[i] / prices[i - 1] - 1 for i in range(1, len(prices))]
+    return {
+        'YEAR': year,
+        'PROVINCE_CODE': province_code,
+        'GROWTH_LAG1': growth[-1],
+        'GROWTH_LAG2': growth[-2],
+        'GROWTH_AVG3': float(np.mean(growth[-3:])),
+    }
+
+
+def forecast(model, history, province_code, end_year, adjust=lambda g: g):
+    """Compound predicted yearly growth from the last known price up to end_year.
+
+    history: {year: price}. adjust lets the app shift each year's growth for a scenario.
+    Returns a list of (year, price, growth).
+    """
+    years = sorted(history)
+    prices = [history[y] for y in years]
+    rows = []
+    for year in range(years[-1] + 1, end_year + 1):
+        row = pd.DataFrame([features_for_year(prices, year, province_code)])[FEATURES]
+        g = adjust(float(model.predict(row)[0]))
+        prices.append(prices[-1] * (1 + g))
+        rows.append((year, prices[-1], g))
+    return rows
+
+
+def _price_metrics(actual, predicted):
+    return {
+        'r2': r2_score(actual, predicted),
+        'rmse': float(np.sqrt(mean_squared_error(actual, predicted))),
+        'mae': mean_absolute_error(actual, predicted),
+    }
+
+
+def train_final_model(df, data_type, label_encoder, chosen_option, full_history):
+    """Compare Random Forest and Gradient Boosting on recent years, then refit the winner on everything."""
     print("\n" + "="*60)
     print(f"TRAINING FINAL MODEL ({data_type.upper()})")
     print("="*60)
     if df is None or df.empty:
         print("No data available for training!")
         return None
-    print(f"Data shape: {df.shape}")
-    print(f"Years: {df['YEAR'].min()} to {df['YEAR'].max()}")
-    print(f"Provinces: {df['PROVINCE'].nunique()}")
-    # Features and target
-    feature_cols = ['YEAR', 'TIME_TREND', 'PROVINCE_CODE', 'VALUE_LAG1', 'GROWTH_RATE']
-    if 'DECADE' in df.columns:
-        feature_cols.append('DECADE')
-    if 'ECONOMIC_BOOM' in df.columns:
-        feature_cols.append('ECONOMIC_BOOM')
-    X = df[[col for col in feature_cols if col in df.columns]]
-    y = df['TARGET_VALUE']
-    print(f"\nFeatures: {list(X.columns)}")
-    print(f"Target range: ${y.min():,.0f} to ${y.max():,.0f}")
-    
-    # Split and scale data
-    X_train, X_test, y_train, y_test = train_test_split(
-        X, y, test_size=0.2, random_state=42, shuffle=True
-    )
-    scaler = StandardScaler()
-    X_train_scaled = scaler.fit_transform(X_train)
-    X_test_scaled = scaler.transform(X_test)
-    # Train both candidates on the same split and keep the better one
+    print(f"Rows: {len(df)}  Years: {df['YEAR'].min()} to {df['YEAR'].max()}  Regions: {df['PROVINCE'].nunique()}")
+
+    train = df[df['YEAR'] < TEST_FROM]
+    test = df[df['YEAR'] >= TEST_FROM]
+    print(f"Train: {train['YEAR'].min()} to {train['YEAR'].max()} ({len(train)} rows)  "
+          f"Test: {test['YEAR'].min()} to {test['YEAR'].max()} ({len(test)} rows)")
+
     candidates = {
-        "Random Forest": RandomForestRegressor(
-            n_estimators=200,
-            max_depth=10,
-            min_samples_split=5,
-            min_samples_leaf=2,
-            random_state=42,
-            n_jobs=-1,
+        "Random Forest": lambda: RandomForestRegressor(
+            n_estimators=300, max_depth=6, min_samples_leaf=3, random_state=42, n_jobs=-1
         ),
-        "Gradient Boosting": GradientBoostingRegressor(
-            n_estimators=400,
-            learning_rate=0.05,
-            max_depth=3,
-            subsample=0.9,
-            random_state=42,
+        "Gradient Boosting": lambda: GradientBoostingRegressor(
+            n_estimators=300, learning_rate=0.03, max_depth=3, subsample=0.9, random_state=42
         ),
     }
-    comparison = {}
-    fitted = {}
-    for name, candidate in candidates.items():
-        print(f"\nTraining {name}...")
-        candidate.fit(X_train_scaled, y_train)
-        y_pred = candidate.predict(X_test_scaled)
-        cv_r2 = cross_val_score(candidate, X_train_scaled, y_train, cv=5, scoring="r2")
-        comparison[name] = {
-            "r2": r2_score(y_test, y_pred),
-            "rmse": float(np.sqrt(mean_squared_error(y_test, y_pred))),
-            "mae": mean_absolute_error(y_test, y_pred),
-            "cv_r2_mean": cv_r2.mean(),
-            "cv_r2_std": cv_r2.std(),
-        }
-        fitted[name] = (candidate, y_pred)
+    comparison, test_predictions = {}, {}
+    for name, make in candidates.items():
+        model = make().fit(train[FEATURES], train['GROWTH'])
+        growth_pred = model.predict(test[FEATURES])
+        price_pred = test['VALUE_LAG1'].to_numpy() * (1 + growth_pred)
+        metrics = _price_metrics(test['TARGET_VALUE'], price_pred)
+        metrics['growth_mae_pts'] = mean_absolute_error(test['GROWTH'], growth_pred) * 100
+        comparison[name] = metrics
+        test_predictions[name] = price_pred
 
-    print("\n" + "="*60)
-    print("MODEL COMPARISON (held out 20%, plus 5 fold CV on the training set):")
+    print("\nMODEL COMPARISON (one year ahead prices, tested on 2018 onward):")
     for name, m in comparison.items():
         print(f"  {name:18} R² {m['r2']:.4f}  MAE ${m['mae']:,.0f}  RMSE ${m['rmse']:,.0f}  "
-              f"CV R² {m['cv_r2_mean']:.4f} ± {m['cv_r2_std']:.4f}")
-    best_name = max(comparison, key=lambda name: comparison[name]["r2"])
-    model, y_pred = fitted[best_name]
-    r2, rmse, mae = (comparison[best_name][k] for k in ("r2", "rmse", "mae"))
-    print(f"\nSelected model: {best_name}")
-    print(f"MAE as % of mean: {(mae / y.mean() * 100):.1f}%")
-    print("="*60)
-    print("\nFEATURE IMPORTANCE:")
-    importance = pd.DataFrame({
-        'feature': X.columns,
-        'importance': model.feature_importances_
-    }).sort_values('importance', ascending=False)
+              f"growth error {m['growth_mae_pts']:.2f} pts")
+    best_name = max(comparison, key=lambda name: comparison[name]['r2'])
+    print(f"\nSelected model: {best_name} (refit on {df['YEAR'].min()} to {df['YEAR'].max()})")
 
-    for _, row in importance.iterrows():
-        print(f"  {row['feature']}: {row['importance']:.4f}")
+    # Refit the winner on all years so forecasts start from the latest data
+    model = candidates[best_name]().fit(df[FEATURES], df['GROWTH'])
+    print("\nFEATURE IMPORTANCE:")
+    for feature, value in sorted(zip(FEATURES, model.feature_importances_), key=lambda p: -p[1]):
+        print(f"  {feature}: {value:.4f}")
+
+    history = {
+        province: dict(zip(group['YEAR'].astype(int), group['TARGET_VALUE'].astype(float)))
+        for province, group in full_history.groupby('PROVINCE')
+    }
+    codes = dict(zip(label_encoder.classes_, label_encoder.transform(label_encoder.classes_)))
+    forecasts = []
+    for province, past in history.items():
+        for year, price, _ in forecast(model, past, codes[province], FORECAST_CHART_END):
+            forecasts.append({'PROVINCE': province, 'YEAR': year, 'TARGET_VALUE': price})
+    forecast_df = pd.DataFrame(forecasts)
+    last_year = max(max(h) for h in history.values())
+    canada = forecast_df[forecast_df['PROVINCE'] == 'Canada'].set_index('YEAR')['TARGET_VALUE']
+    canada_2100 = forecast(model, history['Canada'], codes['Canada'], 2100)[-1][1]
+    print(f"\nCanada forecast: {last_year + 1} ${canada.iloc[0]:,.0f}  "
+          f"{last_year + 10} ${canada.loc[last_year + 10]:,.0f}  2100 ${canada_2100:,.0f}")
 
     # Charts with Matplotlib and Seaborn
     os.makedirs("figures", exist_ok=True)
+    history_df = full_history[full_history['YEAR'] >= FIRST_YEAR]
     figures = {
-        "price_trends.png": charts.price_trends(df),
+        "price_trends.png": charts.price_trends(history_df),
         "model_comparison.png": charts.model_comparison(comparison),
-        "actual_vs_predicted.png": charts.actual_vs_predicted(y_test.to_numpy(), y_pred, best_name),
-        "feature_importance.png": charts.feature_importance(X.columns.tolist(), model.feature_importances_, best_name),
+        "actual_vs_predicted.png": charts.actual_vs_predicted(
+            test['TARGET_VALUE'].to_numpy(), test_predictions[best_name], best_name),
+        "feature_importance.png": charts.feature_importance(FEATURES, model.feature_importances_, best_name),
+        "forecast.png": charts.forecast_paths(history_df, forecast_df),
     }
     for filename, fig in figures.items():
         fig.savefig(os.path.join("figures", filename), dpi=150)
-    print(f"\nSaved {len(figures)} charts to figures/")
+    print(f"Saved {len(figures)} charts to figures/")
 
-    # Saving model
+    best = comparison[best_name]
     model_data = {
         'model': model,
-        'scaler': scaler,
         'label_encoder': label_encoder,
-        'feature_names': X.columns.tolist(),
-        'metrics': {'r2': r2, 'rmse': rmse, 'mae': mae, 'mean_value': y.mean()},
+        'feature_names': FEATURES,
+        'metrics': {'r2': best['r2'], 'rmse': best['rmse'], 'mae': best['mae'],
+                    'mean_value': float(test['TARGET_VALUE'].mean())},
         'model_name': best_name,
         'comparison': comparison,
-        'test_actual': y_test.to_numpy(),
-        'test_predicted': y_pred,
+        'test_actual': test['TARGET_VALUE'].to_numpy(),
+        'test_predicted': test_predictions[best_name],
+        'history': {p: {y: v for y, v in h.items() if y >= FIRST_YEAR - 4} for p, h in history.items()},
         'data_type': data_type,
         'chosen_option': chosen_option,
         'target_unit': 'CAD',
-        'years_range': (df['YEAR'].min(), df['YEAR'].max()),
-        'provinces': df['PROVINCE'].unique().tolist()
+        'years_range': (int(df['YEAR'].min()), int(df['YEAR'].max())),
+        'provinces': sorted(history),
     }
     filename = f"housing_model_{data_type}_{chosen_option}.joblib"
     joblib.dump(model_data, filename)
-    print(f"\n Model saved as '{filename}'")
-    # Sample prediction
-    print("\n" + "="*60)
-    print("SAMPLE PREDICTION:")
-    
-    sample_idx = np.random.default_rng(42).integers(0, len(df))
-    sample = X.iloc[sample_idx:sample_idx+1].copy()
-    sample_scaled = scaler.transform(sample)
-    prediction = model.predict(sample_scaled)[0]
-    actual = y.iloc[sample_idx]
-    print(f"Province: {df.iloc[sample_idx]['PROVINCE']}")
-    print(f"Year: {df.iloc[sample_idx]['YEAR']}")
-    print(f"Actual: ${actual:,.0f}")
-    print(f"Predicted: ${prediction:,.0f}")
-    print(f"Error: ${abs(prediction - actual):,.0f} ({abs(prediction - actual)/actual*100:.1f}%)")
+    print(f"Model saved as '{filename}'")
     return model_data
+
 
 def train_model():
     print("="*60)
@@ -298,12 +307,12 @@ def train_model():
     print(f"\n Using data: {type1}")
     # Prepare features
     df_features, le = prepare_features(df_option1)
-    df_features = df_features.dropna()
+    df_features = df_features.dropna(subset=FEATURES + ['GROWTH'])
     if len(df_features) < 10:
         print("Not enough data after feature preparation!")
         return
     # Train model
-    model_data = train_final_model(df_features, type1, le, "option1")
+    model_data = train_final_model(df_features, type1, le, "option1", df_option1)
     if model_data:
         print("\n" + "="*60)
         print("🎉 MODEL TRAINING COMPLETE!")

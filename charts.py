@@ -69,3 +69,20 @@ def feature_importance(features, importances, model_name):
     ax.set(title=f"{model_name}: feature importance", xlabel="Share of importance")
     fig.tight_layout()
     return fig
+
+
+def forecast_paths(history, forecast):
+    """History since 1990 (solid) and the model's forecast (dashed) for each region."""
+    fig, ax = plt.subplots(figsize=(10, 5.5))
+    palette = dict(zip(sorted(history["PROVINCE"].unique()), sns.color_palette("tab20", 11)))
+    sns.lineplot(data=history, x="YEAR", y="TARGET_VALUE", hue="PROVINCE", palette=palette, linewidth=1.4, ax=ax)
+    sns.lineplot(data=forecast, x="YEAR", y="TARGET_VALUE", hue="PROVINCE", palette=palette,
+                 linewidth=1.4, linestyle="--", legend=False, ax=ax)
+    ax.axvline(history["YEAR"].max() + 0.5, color="gray", linewidth=1)
+    ax.text(history["YEAR"].max() + 1, ax.get_ylim()[1] * 0.97, "forecast", color="gray", fontsize=9, va="top")
+    ax.set(title="House prices since 1990 and forecast for the next ten years",
+           xlabel="Year", ylabel="Estimated price (CAD)")
+    ax.yaxis.set_major_formatter(DOLLARS)
+    ax.legend(ncol=2, fontsize=8, frameon=False)
+    fig.tight_layout()
+    return fig

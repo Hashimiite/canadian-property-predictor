@@ -1,45 +1,76 @@
-import streamlit as st
-import pandas as pd
-import numpy as np
-import joblib
 import os
-import plotly.express as px
+
+import joblib
+import pandas as pd
 import plotly.graph_objects as go
-from datetime import datetime
+import streamlit as st
 
 import charts
 from model import forecast
 
-st.set_page_config(page_title="Canadian Property Value Predictor", layout="wide")
+st.set_page_config(page_title="Canadian House Price Forecast", page_icon="🏠", layout="wide")
+
+ACCENT, TEXT, DIM, LINE, HISTORY = "#eaa442", "#ece9e4", "#9a968f", "#2b2926", "#7a766f"
+
+st.markdown(
+    """
+    <style>
+    @import url('https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500&display=swap');
+    [data-testid="stAppViewContainer"] *:not([data-testid="stIconMaterial"]):not(text):not(tspan),
+    [data-testid="stSidebar"] *:not([data-testid="stIconMaterial"]) {
+        font-family: 'Geist', system-ui, sans-serif !important;
+    }
+    [data-testid="stAppViewContainer"] p.lede > strong:not(text),
+    [data-testid="stSidebar"] [data-testid="stThumbValue"],
+    [data-testid="stSidebar"] [data-testid="stTickBarMin"],
+    [data-testid="stSidebar"] [data-testid="stTickBarMax"],
+    [data-testid="stSidebar"] input { font-family: 'Geist Mono', ui-monospace, monospace !important; }
+    .block-container { padding-top: 2.5rem; padding-bottom: 4rem; max-width: 1180px; }
+    h1 { font-weight: 600 !important; letter-spacing: -0.035em; font-size: 2.6rem !important; margin-bottom: 0.2rem !important; }
+    h2, h3 { font-weight: 600 !important; letter-spacing: -0.02em; }
+    .lede { color: #9a968f; font-size: 1.15rem; line-height: 1.6; max-width: 46em; margin: 0.4rem 0 1.4rem; }
+    .lede strong { color: #ece9e4; font-weight: 500; font-size: 1.05rem; }
+    .js-plotly-plot text { font-variant-numeric: tabular-nums; }
+    [data-testid="stSidebar"] { border-right: 1px solid #2b2926; }
+    [data-testid="stSidebar"] h2 { font-size: 1.05rem !important; margin-top: 0.4rem; }
+    [data-testid="stSidebar"] .stSlider label, [data-testid="stSidebar"] .stSelectbox label,
+    [data-testid="stSidebar"] .stNumberInput label { color: #ece9e4 !important; font-weight: 500; }
+    [data-testid="stCaptionContainer"] { color: #9a968f !important; }
+    [data-testid="stExpander"] { border: 1px solid #2b2926 !important; border-radius: 10px; }
+    .stTabs [data-baseweb="tab"] { font-weight: 500; }
+    #MainMenu, footer, [data-testid="stDecoration"] { visibility: hidden; height: 0; }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
 
 @st.cache_resource
 def load_latest_model():
     """Load the most recent model file"""
-    model_files = [f for f in os.listdir('.') if f.endswith('.joblib') and f.startswith('housing_model_')]
+    model_files = [f for f in os.listdir(".") if f.endswith(".joblib") and f.startswith("housing_model_")]
     if not model_files:
         return None
-    model = sorted(model_files)[-1]
-    try:
-        model_data = joblib.load(model)
-        return model_data, model
-    except:
-        return None, None
+    # Trusted input: this is the model file model.py writes in this project, never user uploaded
+    return joblib.load(sorted(model_files)[-1])
+
 
 def calculate_economic_impacts(interest_rate_change, crime_change, population_growth, economic_outlook):
-    """Calculate impacts impact on housing prices"""
-    interest_rate_impact = -0.02 * interest_rate_change
-    crime_impact = -0.001 * crime_change
-    population_growth_impact = 0.005 * population_growth
-    economic_outlook_impact = 0.01 * economic_outlook
+    """Scenario assumptions that shift each year's predicted growth"""
     return {
-        'interest_rate_impact': interest_rate_impact,
-        'crime_impact': crime_impact,
-        'population_growth_impact': population_growth_impact,
-        'economic_outlook_impact': economic_outlook_impact
+        "interest_rate_impact": -0.02 * interest_rate_change,
+        "crime_impact": -0.001 * crime_change,
+        "population_growth_impact": 0.005 * population_growth,
+        "economic_outlook_impact": 0.01 * economic_outlook,
     }
 
-def generate_predictions_over_years(province, start_year, end_year, economic_factors, model_data):
-    """Compound the model's predicted yearly growth from the province's latest price, shifted by the scenario."""
+
+def generate_predictions_over_years(province, start_year, end_year, economic_factors, model_data, error=0.0):
+    """Compound the model's predicted yearly growth from the region's latest price, shifted by the scenario.
+
+    error is the model's typical yearly growth miss. Treating yearly misses as independent, the band widens
+    with the square root of the number of years ahead.
+    """
     code = model_data["label_encoder"].transform([province])[0]
 
     def adjust(g):
@@ -47,257 +78,131 @@ def generate_predictions_over_years(province, start_year, end_year, economic_fac
         return g * (1 + economic_factors["population_growth_impact"]) * (1 + economic_factors["economic_outlook_impact"])
 
     rows = forecast(model_data["model"], model_data["history"][province], code, end_year, adjust)
-    return pd.DataFrame(
-        [{"Year": y, "Predicted_Value": price, "Growth_Rate": g * 100} for y, price, g in rows if y >= start_year]
-    )
+    last_year = max(model_data["history"][province])
+    out = []
+    for year, price, g in rows:
+        spread = (year - last_year) ** 0.5
+        if year >= start_year:
+            out.append({
+                "Year": year, "Predicted_Value": price, "Growth_Rate": g * 100,
+                "Low": price * (1 - error) ** spread, "High": price * (1 + error) ** spread,
+            })
+    return pd.DataFrame(out)
 
 
-def create_line_chart(prediction_data, province, value_label, history=None):
-    """Create the line chart"""
-    
+def create_line_chart(prediction_data, history):
+    """History since 1990 in grey, the forecast in amber with its typical error range"""
+    years = [y for y in sorted(history) if y >= 1990]
+    last = years[-1]
     fig = go.Figure()
-    if history:
-        years = [y for y in sorted(history) if y >= 1990]
-        fig.add_trace(go.Scatter(
-            x=years,
-            y=[history[y] for y in years],
-            mode='lines',
-            name='Since 1990',
-            line=dict(color='#9a9a9a', width=2),
-            hovertemplate='Year: %{x}<br>Estimated price: $%{y:,.0f}<extra></extra>'
-        ))
+    band_years = [last] + list(prediction_data["Year"])
     fig.add_trace(go.Scatter(
-        x=prediction_data['Year'],
-        y=prediction_data['Predicted_Value'],
-        mode='lines+markers',
-        name=f'{value_label}',
-        line=dict(color='#1f77b4', width=3),
-        marker=dict(size=8),
-        hovertemplate='Year: %{x}<br>' + f'{value_label}: $%{{y:,.0f}}<extra></extra>'
+        x=band_years + band_years[::-1],
+        y=[history[last]] + list(prediction_data["High"]) + ([history[last]] + list(prediction_data["Low"]))[::-1],
+        fill="toself", fillcolor="rgba(234,164,66,0.13)", line=dict(width=0),
+        hoverinfo="skip", name="Typical error range",
     ))
-    
+    fig.add_trace(go.Scatter(
+        x=years, y=[history[y] for y in years], mode="lines", name="Since 1990",
+        line=dict(color=HISTORY, width=2.4),
+        hovertemplate="%{x}<br>$%{y:,.0f}<extra>Recorded</extra>",
+    ))
+    fig.add_trace(go.Scatter(
+        x=[last] + list(prediction_data["Year"]),
+        y=[history[last]] + list(prediction_data["Predicted_Value"]),
+        mode="lines", name="Forecast", line=dict(color=ACCENT, width=3),
+        hovertemplate="%{x}<br>$%{y:,.0f}<extra>Forecast</extra>",
+    ))
+    fig.add_vline(x=last + 0.5, line=dict(color=LINE, width=1))
     fig.update_layout(
-        title=f'{value_label} Forecast for {province}',
-        xaxis_title='Year',
-        yaxis_title=f'{value_label} (CAD)',
-        hovermode='x unified',
-        height=500,
-        template='plotly_white',
-        showlegend=bool(history),
-        legend=dict(orientation='h', y=1.08),
-        margin=dict(l=20, r=20, t=60, b=20)
+        height=470, margin=dict(l=70, r=12, t=12, b=8),
+        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+        font=dict(family="Geist, system-ui, sans-serif", color=DIM, size=13),
+        hovermode="x unified", hoverlabel=dict(bgcolor="#171614", bordercolor=LINE, font_color=TEXT),
+        legend=dict(orientation="h", yanchor="bottom", y=1.0, x=0, font=dict(color=TEXT)),
     )
-    fig.update_yaxes(
-        tickprefix='$',
-        tickformat=',.0f'
-    )
-    fig.update_xaxes(showgrid=True, gridwidth=1, gridcolor='LightGray')
-    fig.update_yaxes(showgrid=True, gridwidth=1, gridcolor='LightGray')
+    fig.update_xaxes(showgrid=False, linecolor=LINE, tickfont=dict(family="Geist, system-ui, sans-serif"))
+    fig.update_yaxes(gridcolor=LINE, zeroline=False, tickprefix="$", tickformat=",.0f", automargin=True,
+                     tickfont=dict(family="Geist, system-ui, sans-serif"))
     return fig
 
+
 def main():
-    model_info = load_latest_model()
-    # Initialize variables
-    model_data = None
-    data_type = 'house_prices'
-
-    if model_info and model_info[0]:
-        model_data, model_file = model_info
-        data_type = model_data.get('data_type', 'house_prices')
+    model_data = load_latest_model()
     if not model_data or "history" not in model_data:
-        st.error("No trained model found. Run `python model.py` first.")
+        st.error("No trained model found. Run `python model.py` to train one, then reload this page.")
         st.stop()
-    
-    # Determine value label based on data type
-    if 'house' in str(data_type).lower():
-        value_label = "House Price"
-        unit = "CAD"
-        title = "Canadian House Price Predictor"
-    else:
-        value_label = "Property Value"
-        unit = "CAD"
-        title = "Canadian Property Value Predictor"
-    
-    st.title(title)
-    col1, col2 = st.columns([1, 2])
-    with col1:
-        st.subheader("Prediction Settings")
-        # Province selection
-        province = st.selectbox(
-            "Select Province",
-            ["Canada", "Ontario", "Quebec", "British Columbia", "Alberta",
-             "Manitoba", "Saskatchewan", "Nova Scotia", "New Brunswick",
-             "Newfoundland and Labrador", "Prince Edward Island"]
-        )
-        # Year range selection
-        first_forecast_year = max(max(h) for h in model_data["history"].values()) + 1
-        st.markdown("Forecast Period")
-        col1a, col1b = st.columns(2)
-        with col1a:
-            start_year = st.number_input(
-                "Start Year",
-                min_value=first_forecast_year,
-                max_value=2099,
-                value=first_forecast_year,
-                step=1
-            )
-        with col1b:
-            end_year = st.number_input(
-                "End Year",
-                min_value=first_forecast_year + 1,
-                max_value=2100,
-                value=first_forecast_year + 10,
-                step=1,
-                help="Forecasts compound year by year and can run as far as 2100."
-            )
-            
-        if end_year <= start_year:
-            st.warning("End year must be greater than start year. Adjusting...")
-            end_year = start_year + 1
-        
-        # Economic factors
-        st.markdown("---")
-        st.markdown("Economic Factors")
-        interest_rate_change = st.slider(
-            "Interest Rate Change (%)",
-            min_value=-5.0,
-            max_value=5.0,
-            value=0.0,
-            step=0.25,
-            help="Higher rates typically lower property values."
-        )
-        crime_change = st.slider(
-            "Crime Rate Change (%)",
-            min_value=-20.0,
-            max_value=20.0,
-            value=0.0,
-            step=1.0,
-            help="Higher crime typically lowers property values."
-        )
-        population_growth = st.slider(
-            "Population Growth (%)",
-            min_value=-5.0,
-            max_value=10.0,
-            value=1.5,
-            step=0.5,
-            help="Higher growth typically increases property values."
-        )
-        economic_outlook = st.slider(
-            "Economic Outlook",
-            min_value=-5,
-            max_value=5,
-            value=0,
-            step=1,
-            help="General economic outlook from -5 (recession) to +5 (boom)"
-        )
-        predict_button = st.button("Generate Forecast", type="primary", use_container_width=True)
-    
-    with col2:
-        st.subheader(" Forecast Over Time")
-        # Placeholder for charts and predictions
-        chart_placeholder = st.empty()# Placeholder for chart
-        details_placeholder = st.empty()
-        if predict_button:
-            with st.spinner("Generating forecast..."):
-                economic_factors = calculate_economic_impacts(
-                    interest_rate_change,
-                    crime_change,
-                    population_growth,
-                    economic_outlook
-                )
-                predictions_df = generate_predictions_over_years( # Generate predictions for the year range
-                    province,  
-                    start_year, 
-                    end_year,
-                    economic_factors,
-                    model_data,
-                )
-                end_year_prediction = predictions_df[predictions_df['Year'] == end_year].iloc[0]
-                start_year_prediction = predictions_df[predictions_df['Year'] == start_year].iloc[0]
-                fig = create_line_chart(predictions_df, province, value_label, model_data['history'][province])
-                chart_placeholder.plotly_chart(fig, use_container_width=True)
-                with details_placeholder.container():
-                    st.markdown("---")
-                    st.subheader("Forecast Summary")
-                    col_a, col_b, col_c = st.columns(3)
-                    with col_a:
-                        total_change = end_year_prediction['Predicted_Value'] - start_year_prediction['Predicted_Value']
-                        pct_change = (total_change / start_year_prediction['Predicted_Value']) * 100
-                        st.metric(
-                            f"{value_label} ({end_year})",
-                            f"${end_year_prediction['Predicted_Value']:,.0f}",
-                            delta=f"{pct_change:.1f}% from {start_year}"
-                        )
-                    with col_b:
-                        annual_growth_rate = ((end_year_prediction['Predicted_Value'] / start_year_prediction['Predicted_Value']) ** (1/(end_year - start_year)) - 1) * 100
-                        st.metric(
-                            "Annual Growth Rate",
-                            f"{annual_growth_rate:.1f}%",
-                            delta="per year"
-                        )
-                    with col_c:
-                        compound_effect = ((1 + economic_factors['interest_rate_impact'] + # Show compound impact
-                                          economic_factors['crime_impact'] + 
-                                          economic_factors['population_growth_impact'] + 
-                                          economic_factors['economic_outlook_impact']) - 1) * 100
-                        st.metric(
-                            "Economic Impact",
-                            f"{compound_effect:.1f}%"
-                        )
-                    # Show detailed table
-                    with st.expander("View Detailed Forecast Table"):
-                        display_df = predictions_df.copy()
-                        display_df['Predicted_Value'] = display_df['Predicted_Value'].apply(lambda x: f"${x:.0f}")
-                        display_df['Growth_Rate'] = display_df['Growth_Rate'].apply(lambda x: f"{x:.2f}%")
-                        st.dataframe(display_df, use_container_width=True, hide_index=True)
-                    # Show factors breakdown
-                    with st.expander("View Economic Factors Breakdown"):
-                        factors_df = pd.DataFrame({
-                            'Factor': ['Interest Rate Change', 'Crime Rate Change', 'Population Growth', 'Economic Outlook'],
-                            'Impact (%)': [
-                                economic_factors['interest_rate_impact'] * 100,
-                                economic_factors['crime_impact'] * 100,
-                                economic_factors['population_growth_impact'] * 100,
-                                economic_factors['economic_outlook_impact'] * 100
-                            ],
-                            'Effect': [
-                                'Negative' if economic_factors['interest_rate_impact'] < 0 else 'Positive',
-                                'Negative' if economic_factors['crime_impact'] < 0 else 'Positive',
-                                'Positive' if economic_factors['population_growth_impact'] > 0 else 'Negative',
-                                'Positive' if economic_factors['economic_outlook_impact'] > 0 else 'Negative'
-                            ]
-                        })
-                        st.dataframe(factors_df, use_container_width=True, hide_index=True)
-        else: # Show instruction
-            with chart_placeholder.container():
-                st.info("Adjust the settings and click 'Generate Forecast' to update this chart")
-                preview_factors = calculate_economic_impacts(
-                    interest_rate_change, crime_change, population_growth, economic_outlook
-                )
-                preview = generate_predictions_over_years(province, start_year, end_year, preview_factors, model_data)
-                preview_fig = create_line_chart(preview, province, value_label, model_data["history"][province])
-                st.plotly_chart(preview_fig, use_container_width=True)
-                st.caption(f"Prices since 1990 and the forecast to {end_year} at the current settings")
-            with details_placeholder.container():
-                st.caption("Adjust the sliders to see how different economic factors affect property values over time.")
 
-    # Model evaluation drawn with Matplotlib and Seaborn
-    if model_data and "comparison" in model_data:
-        st.markdown("---")
-        st.subheader("How the model performs")
-        best = model_data.get("model_name", "Model")
-        st.caption(
-            f"Both models trained on 1990 to 2017 and were tested on 2018 onward; {best} scored better. "
-            "It predicts each year's growth from recent growth, so these scores describe one year ahead accuracy. "
-            "Longer forecasts compound those predictions and grow less certain the further out they go."
+    history_all = model_data["history"]
+    last_year = max(max(h) for h in history_all.values())
+    best = model_data.get("model_name", "Model")
+    growth_error = model_data["comparison"][best].get("growth_mae_pts", 0) / 100
+
+    with st.sidebar:
+        st.header("Forecast settings")
+        regions = ["Canada"] + sorted(p for p in history_all if p != "Canada")
+        province = st.selectbox("Region", regions)
+        col_a, col_b = st.columns(2)
+        start_year = col_a.number_input("From", min_value=last_year + 1, max_value=2099, value=last_year + 1, step=1)
+        end_year = col_b.number_input("To", min_value=last_year + 2, max_value=2100, value=last_year + 11, step=1,
+                                      help="Forecasts compound year by year and can run as far as 2100.")
+        if end_year <= start_year:
+            end_year = start_year + 1
+            st.caption(f"The end year moved to {end_year} so it comes after the start year.")
+
+        st.header("Scenario")
+        st.caption("These assumptions shift each year's predicted growth. They come from the scenario you set, not from the data.")
+        interest_rate_change = st.slider("Interest rate change (points)", -5.0, 5.0, 0.0, 0.25)
+        crime_change = st.slider("Crime rate change (%)", -20.0, 20.0, 0.0, 1.0)
+        population_growth = st.slider("Population growth (%)", -5.0, 10.0, 1.5, 0.5)
+        economic_outlook = st.slider("Economic outlook", -5, 5, 0, 1, help="From -5 (recession) to +5 (boom)")
+
+    factors = calculate_economic_impacts(interest_rate_change, crime_change, population_growth, economic_outlook)
+    predictions = generate_predictions_over_years(province, start_year, end_year, factors, model_data, growth_error)
+    history = history_all[province]
+    today, final = history[last_year], predictions.iloc[-1]
+    years = int(final["Year"]) - last_year
+    yearly = ((final["Predicted_Value"] / today) ** (1 / years) - 1) * 100
+
+    st.title(f"House prices in {province}")
+    st.markdown(
+        f"<p class='lede'>The average new house was about <strong>${today:,.0f}</strong> in {last_year}. "
+        f"Under this scenario the model expects about <strong>${final['Predicted_Value']:,.0f}</strong> by {int(final['Year'])}, "
+        f"which works out to {yearly:.1f}% a year. Allowing for the model's typical yearly error, "
+        f"the {int(final['Year'])} price most likely lands between ${final['Low']:,.0f} and ${final['High']:,.0f}.</p>",
+        unsafe_allow_html=True,
+    )
+    st.plotly_chart(create_line_chart(predictions, history), use_container_width=True, config={"displayModeBar": False})
+
+    with st.expander("Year by year forecast"):
+        table = predictions.rename(columns={"Predicted_Value": "Forecast", "Growth_Rate": "Growth"})
+        st.dataframe(
+            table[["Year", "Forecast", "Low", "High", "Growth"]],
+            hide_index=True, use_container_width=True,
+            column_config={
+                "Year": st.column_config.NumberColumn(format="%d"),
+                "Forecast": st.column_config.NumberColumn(format="$%,.0f"),
+                "Low": st.column_config.NumberColumn("Typical low", format="$%,.0f"),
+                "High": st.column_config.NumberColumn("Typical high", format="$%,.0f"),
+                "Growth": st.column_config.NumberColumn("Yearly growth", format="%.2f%%"),
+            },
         )
-        tab_compare, tab_fit, tab_features = st.tabs(["Model comparison", "Actual vs predicted", "Feature importance"])
-        with tab_compare:
-            st.pyplot(charts.model_comparison(model_data["comparison"]))
-        with tab_fit:
-            st.pyplot(charts.actual_vs_predicted(model_data["test_actual"], model_data["test_predicted"], best))
-        with tab_features:
-            st.pyplot(charts.feature_importance(model_data["feature_names"], model_data["model"].feature_importances_, best))
-                
+
+    st.subheader("How the model performs")
+    st.caption(
+        f"Both models trained on 1990 to 2017 and were tested on 2018 onward, where {best} scored better. "
+        "It predicts each year's growth from recent growth, so these scores describe one year ahead accuracy. "
+        "Longer forecasts compound those predictions and grow less certain the further out they go."
+    )
+    tab_compare, tab_fit, tab_features = st.tabs(["Model comparison", "Actual vs predicted", "Feature importance"])
+    with tab_compare:
+        st.pyplot(charts.model_comparison(model_data["comparison"]))
+    with tab_fit:
+        st.pyplot(charts.actual_vs_predicted(model_data["test_actual"], model_data["test_predicted"], best))
+    with tab_features:
+        st.pyplot(charts.feature_importance(model_data["feature_names"], model_data["model"].feature_importances_, best))
+    st.caption("Data: Statistics Canada new housing price index, used under the Open Government Licence (Canada).")
+
+
 if __name__ == "__main__":
     main()

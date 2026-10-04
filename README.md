@@ -2,7 +2,7 @@
 
 A machine learning model that forecasts average new house prices for Canada and each province, with a Streamlit app that projects prices from 2026 to any year up to 2100 under different economic scenarios.
 
-![House prices since 1990 and the ten year forecast](figures/forecast.png)
+![The Streamlit app showing prices since 1990 and the forecast to 2036](figures/app.jpg)
 
 ## How it works
 
@@ -17,7 +17,9 @@ Two models were trained on 1990 to 2017 and tested on 2018 to 2025, so the test 
 
 The Random Forest scored better, so it was refit on all years from 1990 to 2025 and saved. Its forecast for Canada is about $634,000 in 2026 and $863,000 by 2035, which is roughly 3.5% growth a year. Forecasts further out compound the same way and become less certain the further they go.
 
-`app.py` loads the saved model and shows prices since 1990 next to the forecast. You can pick a region, choose any range from 2026 to 2100 (ten years by default) and adjust interest rates, crime, population growth and the economic outlook to shift each year's growth. A "How the model performs" section draws the evaluation charts live.
+`app.py` loads the saved model and shows prices since 1990 next to the forecast, with a shaded range for the model's typical yearly error. Pick a region in the sidebar, choose any range from 2026 to 2100 (ten years by default) and adjust interest rates, crime, population growth and the economic outlook to shift each year's growth. The chart and summary update as you change settings, and a "How the model performs" section draws the evaluation charts live. The app uses the same dark palette and Geist type as [hashimjama.dev](https://hashimjama.dev).
+
+![House prices since 1990 and the ten year forecast for every region](figures/forecast.png)
 
 ## Charts
 

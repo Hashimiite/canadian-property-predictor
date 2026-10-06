@@ -23,6 +23,8 @@ Tuned settings don't ship just because they scored well in cross validation. Eac
 | Random Forest | $17,144 | $15,882 | 0.015 | **B (tuned)** | `max_depth=None, max_features=0.6, min_samples_leaf=1` |
 | Gradient Boosting | $17,464 | $17,301 | 0.392 | A (current) | `learning_rate=0.01, max_depth=4, n_estimators=300` |
 
+![A/B tests: current vs tuned settings for each model](figures/ab_tests.png)
+
 The shipped variant of each model is then compared:
 
 | Model | R² (one year ahead price) | Mean absolute error | Growth error |
@@ -38,7 +40,7 @@ The tuned Random Forest scored better, so it was refit on all years from 1990 to
 
 ## Charts
 
-`charts.py` builds every chart with Matplotlib and Seaborn. Training saves them to `figures/` and the app renders the same functions live.
+`charts.py` builds every chart with Matplotlib (and Seaborn on top of it), including the app's forecast chart. Training saves them to `figures/` and the app renders the same functions live.
 
 ![Estimated new house prices by province](figures/price_trends.png)
 

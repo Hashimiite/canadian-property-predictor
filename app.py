@@ -2,15 +2,12 @@ import os
 
 import joblib
 import pandas as pd
-import plotly.graph_objects as go
 import streamlit as st
 
 import charts
 from model import forecast
 
 st.set_page_config(page_title="Canadian House Price Forecast", page_icon="🏠", layout="wide")
-
-ACCENT, TEXT, DIM, LINE, HISTORY = "#eaa442", "#ece9e4", "#9a968f", "#2b2926", "#7a766f"
 
 st.markdown(
     """
@@ -30,7 +27,6 @@ st.markdown(
     h2, h3 { font-weight: 600 !important; letter-spacing: -0.02em; }
     .lede { color: #9a968f; font-size: 1.15rem; line-height: 1.6; max-width: 46em; margin: 0.4rem 0 1.4rem; }
     .lede strong { color: #ece9e4; font-weight: 500; font-size: 1.05rem; }
-    .js-plotly-plot text { font-variant-numeric: tabular-nums; }
     [data-testid="stSidebar"] { border-right: 1px solid #2b2926; }
     [data-testid="stSidebar"] h2 { font-size: 1.05rem !important; margin-top: 0.4rem; }
     [data-testid="stSidebar"] .stSlider label, [data-testid="stSidebar"] .stSelectbox label,
@@ -90,43 +86,6 @@ def generate_predictions_over_years(province, start_year, end_year, economic_fac
     return pd.DataFrame(out)
 
 
-def create_line_chart(prediction_data, history):
-    """History since 1990 in grey, the forecast in amber with its typical error range"""
-    years = [y for y in sorted(history) if y >= 1990]
-    last = years[-1]
-    fig = go.Figure()
-    band_years = [last] + list(prediction_data["Year"])
-    fig.add_trace(go.Scatter(
-        x=band_years + band_years[::-1],
-        y=[history[last]] + list(prediction_data["High"]) + ([history[last]] + list(prediction_data["Low"]))[::-1],
-        fill="toself", fillcolor="rgba(234,164,66,0.13)", line=dict(width=0),
-        hoverinfo="skip", name="Typical error range",
-    ))
-    fig.add_trace(go.Scatter(
-        x=years, y=[history[y] for y in years], mode="lines", name="Since 1990",
-        line=dict(color=HISTORY, width=2.4),
-        hovertemplate="%{x}<br>$%{y:,.0f}<extra>Recorded</extra>",
-    ))
-    fig.add_trace(go.Scatter(
-        x=[last] + list(prediction_data["Year"]),
-        y=[history[last]] + list(prediction_data["Predicted_Value"]),
-        mode="lines", name="Forecast", line=dict(color=ACCENT, width=3),
-        hovertemplate="%{x}<br>$%{y:,.0f}<extra>Forecast</extra>",
-    ))
-    fig.add_vline(x=last + 0.5, line=dict(color=LINE, width=1))
-    fig.update_layout(
-        height=470, margin=dict(l=70, r=12, t=12, b=8),
-        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-        font=dict(family="Geist, system-ui, sans-serif", color=DIM, size=13),
-        hovermode="x unified", hoverlabel=dict(bgcolor="#171614", bordercolor=LINE, font_color=TEXT),
-        legend=dict(orientation="h", yanchor="bottom", y=1.0, x=0, font=dict(color=TEXT)),
-    )
-    fig.update_xaxes(showgrid=False, linecolor=LINE, tickfont=dict(family="Geist, system-ui, sans-serif"))
-    fig.update_yaxes(gridcolor=LINE, zeroline=False, tickprefix="$", tickformat=",.0f", automargin=True,
-                     tickfont=dict(family="Geist, system-ui, sans-serif"))
-    return fig
-
-
 def main():
     model_data = load_latest_model()
     if not model_data or "history" not in model_data:
@@ -172,7 +131,7 @@ def main():
         f"the {int(final['Year'])} price most likely lands between ${final['Low']:,.0f} and ${final['High']:,.0f}.</p>",
         unsafe_allow_html=True,
     )
-    st.plotly_chart(create_line_chart(predictions, history), use_container_width=True, config={"displayModeBar": False})
+    st.pyplot(charts.forecast_band(history, predictions))
 
     with st.expander("Year by year forecast"):
         table = predictions.rename(columns={"Predicted_Value": "Forecast", "Growth_Rate": "Growth"})
@@ -204,6 +163,7 @@ def main():
             "cross validation on 1990 to 2017 (B). A one sided paired Wilcoxon signed-rank test compares their price "
             "errors on the same 2018 onward rows. B ships only if its errors are significantly smaller (p < 0.05)."
         )
+        st.pyplot(charts.ab_tests(model_data["ab_tests"]))
         st.dataframe(
             pd.DataFrame([
                 {"Model": name, "A: current": t["mae_a"], "B: tuned": t["mae_b"], "p": t["p_value"],

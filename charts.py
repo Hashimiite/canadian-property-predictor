@@ -95,3 +95,42 @@ def forecast_paths(history, forecast):
     ax.legend(ncol=2, fontsize=8, frameon=False)
     fig.tight_layout()
     return fig
+
+
+def forecast_band(history, predictions):
+    """History since 1990 in grey, the forecast in amber with its typical error range (used by the app)."""
+    years = [y for y in sorted(history) if y >= 1990]
+    last = years[-1]
+    band_years = [last] + list(predictions["Year"])
+    fig, ax = plt.subplots(figsize=(8, 3.8))
+    ax.fill_between(band_years, [history[last]] + list(predictions["Low"]), [history[last]] + list(predictions["High"]),
+                    color=ACCENT, alpha=0.15, linewidth=0, label="Typical error range")
+    ax.plot(years, [history[y] for y in years], color="#7a766f", linewidth=2.2, label="Since 1990")
+    ax.plot(band_years, [history[last]] + list(predictions["Predicted_Value"]), color=ACCENT, linewidth=2.6,
+            label="Forecast")
+    ax.axvline(last + 0.5, color=LINE, linewidth=1)
+    ax.set(xlabel="", ylabel="")
+    ax.yaxis.set_major_formatter(DOLLARS)
+    ax.legend(loc="upper left", ncol=3, frameon=False)
+    fig.tight_layout()
+    return fig
+
+
+def ab_tests(results):
+    """Current (A) vs tuned (B) test MAE for each model, with the A/B test's p value and which variant ships."""
+    fig, axes = plt.subplots(1, len(results), figsize=(10, 4), sharey=True)
+    for ax, (name, t) in zip(axes, results.items()):
+        maes = [t["mae_a"], t["mae_b"]]
+        colors = [ACCENT if t["winner"] == v else "#4a4743" for v in ("A", "B")]
+        bars = ax.bar(["A: current", "B: tuned"], maes, color=colors, width=0.6, edgecolor="none")
+        for bar, mae in zip(bars, maes):
+            ax.annotate(f"${mae:,.0f}", (bar.get_x() + bar.get_width() / 2, mae),
+                        ha="center", va="bottom", fontsize=9, color=TEXT)
+        ships = "B ships" if t["winner"] == "B" else "A stays"
+        ax.set(title=f"{name}: p = {t['p_value']:.3f}, {ships}")
+        ax.margins(y=0.12)
+    axes[0].set_ylabel("Test MAE (CAD, lower is better)")
+    axes[0].yaxis.set_major_locator(mticker.MultipleLocator(5000))
+    axes[0].yaxis.set_major_formatter(DOLLARS)
+    fig.tight_layout()
+    return fig

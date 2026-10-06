@@ -324,6 +324,7 @@ def train_final_model(df, data_type, label_encoder, chosen_option, full_history)
     figures = {
         "price_trends.png": charts.price_trends(history_df),
         "model_comparison.png": charts.model_comparison(comparison),
+        "ab_tests.png": charts.ab_tests(ab_tests),
         "actual_vs_predicted.png": charts.actual_vs_predicted(
             test['TARGET_VALUE'].to_numpy(), test_predictions[best_name], best_name),
         "feature_importance.png": charts.feature_importance(FEATURES, model.feature_importances_, best_name),

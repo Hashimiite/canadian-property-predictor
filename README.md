@@ -8,16 +8,31 @@ A machine learning model that forecasts average new house prices for Canada and 
 
 `model.py` reads the Statistics Canada new housing price index, converts it into estimated prices in Canadian dollars and keeps every year from 1990 to 2025. Instead of predicting a price directly, the models predict each year's growth from the previous years' growth, the region and the year. Forecasts then compound those predictions year by year from each region's latest price, which lets them run well past the range the models were trained on.
 
-Two models were trained on 1990 to 2017 and tested on 2018 to 2025, so the test years are ones the models never saw:
+Two models were tuned and trained on 1990 to 2017 and tested on 2018 to 2025, so the test years are ones the models never saw.
+
+### Hyperparameter tuning
+
+Each model's settings are tuned with a grid search (18 combinations per model) scored by cross validation on the training years. The folds are expanding windows that never split a year: each one trains on earlier years and validates on the next block of five, so tuning never peeks at the 2018 to 2025 test years.
+
+### A/B tests
+
+Tuned settings don't ship just because they scored well in cross validation. Each model's current settings (A) are tested against its tuned settings (B) on the same 88 held out rows with a one sided paired Wilcoxon signed-rank test on the absolute price errors. B replaces A only if its errors are significantly smaller (p < 0.05):
+
+| Model | A: current MAE | B: tuned MAE | p value | Ships | Tuned settings |
+|---|---|---|---|---|---|
+| Random Forest | $17,144 | $15,882 | 0.015 | **B (tuned)** | `max_depth=None, max_features=0.6, min_samples_leaf=1` |
+| Gradient Boosting | $17,464 | $17,301 | 0.392 | A (current) | `learning_rate=0.01, max_depth=4, n_estimators=300` |
+
+The shipped variant of each model is then compared:
 
 | Model | R² (one year ahead price) | Mean absolute error | Growth error |
 |---|---|---|---|
-| **Random Forest** (selected) | **0.953** | **$17,144** | **2.95 points** |
+| **Random Forest, tuned** (selected) | **0.958** | **$15,882** | **2.75 points** |
 | Gradient Boosting | 0.948 | $17,464 | 3.04 points |
 
-The Random Forest scored better, so it was refit on all years from 1990 to 2025 and saved. Its forecast for Canada is about $634,000 in 2026 and $863,000 by 2035, which is roughly 3.5% growth a year. Forecasts further out compound the same way and become less certain the further they go.
+The tuned Random Forest scored better, so it was refit on all years from 1990 to 2025 and saved. Its forecast for Canada is about $640,000 in 2026 and $832,000 by 2035, which is roughly 3% growth a year. Forecasts further out compound the same way and become less certain the further they go.
 
-`app.py` loads the saved model and shows prices since 1990 next to the forecast, with a shaded range for the model's typical yearly error. Pick a region in the sidebar, choose any range from 2026 to 2100 (ten years by default) and adjust interest rates, crime, population growth and the economic outlook to shift each year's growth. The chart and summary update as you change settings, and a "How the model performs" section draws the evaluation charts live. The app uses the same dark palette and Geist type as [hashimjama.dev](https://hashimjama.dev).
+`app.py` loads the saved model and shows prices since 1990 next to the forecast, with a shaded range for the model's typical yearly error. Pick a region in the sidebar, choose any range from 2026 to 2100 (ten years by default) and adjust interest rates, crime, population growth and the economic outlook to shift each year's growth. The chart and summary update as you change settings, and a "How the model performs" section draws the evaluation charts and A/B test results live. The app uses the same dark palette and Geist type as [hashimjama.dev](https://hashimjama.dev).
 
 ![House prices since 1990 and the ten year forecast for every region](figures/forecast.png)
 
@@ -27,7 +42,7 @@ The Random Forest scored better, so it was refit on all years from 1990 to 2025 
 
 ![Estimated new house prices by province](figures/price_trends.png)
 
-![Random Forest vs Gradient Boosting](figures/model_comparison.png)
+![Tuned Random Forest vs Gradient Boosting](figures/model_comparison.png)
 
 | Actual vs predicted (2018 to 2025) | Feature importance |
 |---|---|
@@ -41,7 +56,7 @@ pip install -r requirements.txt
 streamlit run app.py
 ```
 
-To retrain, run `python model.py`. It compares both models on the recent test years, refits the better one on all data, saves it as `housing_model_*.joblib` (which the app picks up automatically) and redraws the charts in `figures/`.
+To retrain, run `python model.py`. It tunes both models, A/B tests tuned against current settings, compares the shipped variants on the recent test years, refits the better one on all data, saves it as `housing_model_*.joblib` (which the app picks up automatically) and redraws the charts in `figures/`.
 
 ## Data
 

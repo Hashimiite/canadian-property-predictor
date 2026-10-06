@@ -1,6 +1,8 @@
 import pandas as pd
 import numpy as np
+from scipy.stats import wilcoxon
 from sklearn.ensemble import GradientBoostingRegressor, RandomForestRegressor
+from sklearn.model_selection import GridSearchCV, ParameterGrid, TimeSeriesSplit
 from sklearn.preprocessing import LabelEncoder
 from sklearn.metrics import r2_score, mean_squared_error, mean_absolute_error
 import joblib
@@ -140,6 +142,30 @@ FIRST_YEAR = 1990
 TEST_FROM = 2018  # train on 1990 to 2017, test on 2018 onward
 FORECAST_CHART_END = 2036
 FEATURES = ['YEAR', 'PROVINCE_CODE', 'GROWTH_LAG1', 'GROWTH_LAG2', 'GROWTH_AVG3']
+AB_ALPHA = 0.05  # tuned settings ship only if they beat the current ones at this significance level
+
+# Variant A: the hand picked settings each model has used so far
+BASELINES = {
+    "Random Forest": lambda: RandomForestRegressor(
+        n_estimators=300, max_depth=6, min_samples_leaf=3, random_state=42, n_jobs=-1
+    ),
+    "Gradient Boosting": lambda: GradientBoostingRegressor(
+        n_estimators=300, learning_rate=0.03, max_depth=3, subsample=0.9, random_state=42
+    ),
+}
+# Variant B: the best settings from these grids, found with cross validation on the training years only
+PARAM_GRIDS = {
+    "Random Forest": {
+        "max_depth": [3, 6, None],
+        "min_samples_leaf": [1, 3, 5],
+        "max_features": [1.0, 0.6],
+    },
+    "Gradient Boosting": {
+        "n_estimators": [150, 300],
+        "learning_rate": [0.01, 0.03, 0.1],
+        "max_depth": [2, 3, 4],
+    },
+}
 
 
 def prepare_features(df):
@@ -195,8 +221,45 @@ def _price_metrics(actual, predicted):
     }
 
 
+def year_folds(years, n_splits=4):
+    """Expanding window folds that never split a year: train on earlier years, validate on the next block."""
+    unique = np.unique(years)
+    return [(np.flatnonzero(np.isin(years, unique[tr])), np.flatnonzero(np.isin(years, unique[va])))
+            for tr, va in TimeSeriesSplit(n_splits).split(unique)]
+
+
+def tune(name, train):
+    """Grid search the model's settings on the training years. Returns the best settings and their validation growth MAE."""
+    search = GridSearchCV(
+        BASELINES[name](), PARAM_GRIDS[name], cv=year_folds(train['YEAR'].to_numpy()),
+        scoring='neg_mean_absolute_error', n_jobs=-1,
+    ).fit(train[FEATURES], train['GROWTH'])
+    return search.best_params_, -search.best_score_ * 100
+
+
+def ab_test(actual, pred_a, pred_b):
+    """One sided paired Wilcoxon signed-rank test on each test row's absolute price error.
+
+    B (tuned) wins only if its errors are significantly smaller than A's (current), otherwise A stays.
+    """
+    err_a, err_b = np.abs(actual - pred_a), np.abs(actual - pred_b)
+    # Identical predictions (the grid picked A's settings) leave nothing to test
+    p_value = 1.0 if np.allclose(err_a, err_b) else float(wilcoxon(err_a, err_b, alternative='greater').pvalue)
+    return {'mae_a': float(err_a.mean()), 'mae_b': float(err_b.mean()), 'p_value': p_value,
+            'rows': len(actual), 'winner': 'B' if p_value < AB_ALPHA else 'A'}
+
+
+def _evaluate(model, test):
+    """One year ahead price metrics on the test years, plus the price predictions."""
+    growth_pred = model.predict(test[FEATURES])
+    price_pred = test['VALUE_LAG1'].to_numpy() * (1 + growth_pred)
+    metrics = _price_metrics(test['TARGET_VALUE'], price_pred)
+    metrics['growth_mae_pts'] = mean_absolute_error(test['GROWTH'], growth_pred) * 100
+    return metrics, price_pred
+
+
 def train_final_model(df, data_type, label_encoder, chosen_option, full_history):
-    """Compare Random Forest and Gradient Boosting on recent years, then refit the winner on everything."""
+    """Tune both models, A/B test tuned against current settings, compare the shipped variants, then refit the winner on everything."""
     print("\n" + "="*60)
     print(f"TRAINING FINAL MODEL ({data_type.upper()})")
     print("="*60)
@@ -210,23 +273,21 @@ def train_final_model(df, data_type, label_encoder, chosen_option, full_history)
     print(f"Train: {train['YEAR'].min()} to {train['YEAR'].max()} ({len(train)} rows)  "
           f"Test: {test['YEAR'].min()} to {test['YEAR'].max()} ({len(test)} rows)")
 
-    candidates = {
-        "Random Forest": lambda: RandomForestRegressor(
-            n_estimators=300, max_depth=6, min_samples_leaf=3, random_state=42, n_jobs=-1
-        ),
-        "Gradient Boosting": lambda: GradientBoostingRegressor(
-            n_estimators=300, learning_rate=0.03, max_depth=3, subsample=0.9, random_state=42
-        ),
-    }
-    comparison, test_predictions = {}, {}
-    for name, make in candidates.items():
-        model = make().fit(train[FEATURES], train['GROWTH'])
-        growth_pred = model.predict(test[FEATURES])
-        price_pred = test['VALUE_LAG1'].to_numpy() * (1 + growth_pred)
-        metrics = _price_metrics(test['TARGET_VALUE'], price_pred)
-        metrics['growth_mae_pts'] = mean_absolute_error(test['GROWTH'], growth_pred) * 100
-        comparison[name] = metrics
-        test_predictions[name] = price_pred
+    comparison, test_predictions, ab_tests, chosen_params = {}, {}, {}, {}
+    actual = test['TARGET_VALUE'].to_numpy()
+    for name, make in BASELINES.items():
+        params, cv_mae = tune(name, train)
+        print(f"\nTUNING {name}: best of {len(list(ParameterGrid(PARAM_GRIDS[name])))} settings {params} "
+              f"(validation growth error {cv_mae:.2f} pts)")
+        results = {variant: _evaluate(make().set_params(**p).fit(train[FEATURES], train['GROWTH']), test)
+                   for variant, p in (('A', {}), ('B', params))}
+        ab = ab_test(actual, results['A'][1], results['B'][1])
+        ab['params_b'] = params
+        ab_tests[name] = ab
+        print(f"A/B TEST {name}: A (current) MAE ${ab['mae_a']:,.0f}  B (tuned) MAE ${ab['mae_b']:,.0f}  "
+              f"p = {ab['p_value']:.4f}  -> {'B ships' if ab['winner'] == 'B' else 'A stays'}")
+        chosen_params[name] = params if ab['winner'] == 'B' else {}
+        comparison[name], test_predictions[name] = results[ab['winner']]
 
     print("\nMODEL COMPARISON (one year ahead prices, tested on 2018 onward):")
     for name, m in comparison.items():
@@ -236,7 +297,7 @@ def train_final_model(df, data_type, label_encoder, chosen_option, full_history)
     print(f"\nSelected model: {best_name} (refit on {df['YEAR'].min()} to {df['YEAR'].max()})")
 
     # Refit the winner on all years so forecasts start from the latest data
-    model = candidates[best_name]().fit(df[FEATURES], df['GROWTH'])
+    model = BASELINES[best_name]().set_params(**chosen_params[best_name]).fit(df[FEATURES], df['GROWTH'])
     print("\nFEATURE IMPORTANCE:")
     for feature, value in sorted(zip(FEATURES, model.feature_importances_), key=lambda p: -p[1]):
         print(f"  {feature}: {value:.4f}")
@@ -281,6 +342,7 @@ def train_final_model(df, data_type, label_encoder, chosen_option, full_history)
                     'mean_value': float(test['TARGET_VALUE'].mean())},
         'model_name': best_name,
         'comparison': comparison,
+        'ab_tests': ab_tests,
         'test_actual': test['TARGET_VALUE'].to_numpy(),
         'test_predicted': test_predictions[best_name],
         'history': {p: {y: v for y, v in h.items() if y >= FIRST_YEAR - 4} for p, h in history.items()},

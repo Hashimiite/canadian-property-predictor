@@ -181,22 +181,43 @@ def main():
             hide_index=True, use_container_width=True,
             column_config={
                 "Year": st.column_config.NumberColumn(format="%d"),
-                "Forecast": st.column_config.NumberColumn(format="$%,.0f"),
-                "Low": st.column_config.NumberColumn("Typical low", format="$%,.0f"),
-                "High": st.column_config.NumberColumn("Typical high", format="$%,.0f"),
+                "Forecast": st.column_config.NumberColumn(format="$%.0f"),
+                "Low": st.column_config.NumberColumn("Typical low", format="$%.0f"),
+                "High": st.column_config.NumberColumn("Typical high", format="$%.0f"),
                 "Growth": st.column_config.NumberColumn("Yearly growth", format="%.2f%%"),
             },
         )
 
     st.subheader("How the model performs")
     st.caption(
-        f"Both models trained on 1990 to 2017 and were tested on 2018 onward, where {best} scored better. "
+        f"Both models were tuned and trained on 1990 to 2017 and tested on 2018 onward, where {best} scored better. "
         "It predicts each year's growth from recent growth, so these scores describe one year ahead accuracy. "
         "Longer forecasts compound those predictions and grow less certain the further out they go."
     )
-    tab_compare, tab_fit, tab_features = st.tabs(["Model comparison", "Actual vs predicted", "Feature importance"])
+    tab_compare, tab_ab, tab_fit, tab_features = st.tabs(
+        ["Model comparison", "A/B tests", "Actual vs predicted", "Feature importance"])
     with tab_compare:
         st.pyplot(charts.model_comparison(model_data["comparison"]))
+    with tab_ab:
+        st.caption(
+            "Each model's current settings (A) were tested against settings tuned by grid search with year by year "
+            "cross validation on 1990 to 2017 (B). A one sided paired Wilcoxon signed-rank test compares their price "
+            "errors on the same 2018 onward rows. B ships only if its errors are significantly smaller (p < 0.05)."
+        )
+        st.dataframe(
+            pd.DataFrame([
+                {"Model": name, "A: current": t["mae_a"], "B: tuned": t["mae_b"], "p": t["p_value"],
+                 "Ships": "B (tuned)" if t["winner"] == "B" else "A (current)",
+                 "Tuned settings": ", ".join(f"{k}={v}" for k, v in t["params_b"].items())}
+                for name, t in model_data["ab_tests"].items()
+            ]),
+            hide_index=True, use_container_width=True,
+            column_config={
+                "A: current": st.column_config.NumberColumn("A: current MAE", format="$%.0f"),
+                "B: tuned": st.column_config.NumberColumn("B: tuned MAE", format="$%.0f"),
+                "p": st.column_config.NumberColumn("p value", format="%.4f"),
+            },
+        )
     with tab_fit:
         st.pyplot(charts.actual_vs_predicted(model_data["test_actual"], model_data["test_predicted"], best))
     with tab_features:
